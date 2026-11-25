@@ -1,0 +1,130 @@
+---
+title: "Censored regression SVM: linear and additive structure"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Censored regression SVM: linear and additive structure}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+## The censored regression objective
+
+For observed time $y_i$, event indicator $\delta_i$, and
+$f_i=b+g(x_i)$, the fitted objective is
+\[
+ \frac12\|g\|_{\mathcal H}^2+
+ C\sum_i\{(y_i-f_i)_++\delta_i(f_i-y_i)_+\}.
+\]
+An observed failure has a two-sided absolute loss. A censored observation
+penalizes predictions below its observed follow-up, but not above it.
+This is zero-epsilon censored support vector regression, not a ranking SVM.
+Every training row enters the objective, including repeated rows.
+
+Its dual is
+\[
+ \min_c\ \tfrac12 c^\top Kc-y^\top c,\qquad
+ \mathbf1^\top c=0,\quad -C\delta_i\le c_i\le C .
+\]
+Writing $c=\alpha-D\beta$, with $D=\operatorname{diag}(\delta)$,
+gives the positive-semidefinite Hessian
+\[
+ H=\begin{pmatrix}K&-KD\\-DK&DKD\end{pmatrix}.
+\]
+No positive-definite projection or eigenvalue truncation is required.
+The package solves an equivalent sparse primal and independently checks
+its objective against the dual, along with primal and dual feasibility.
+Only fully converged and certified fits are returned.
+
+## Exact additive representation
+
+The linear kernel uses $g(x)=x^\top w$ and penalty $\|w\|^2/2$.
+For the additive kernel,
+\[
+ K(x,z)=\sum_j\left(1-\frac{|x_j-z_j|}{R_j}\right),\qquad
+ R_j=\max_{\rm train}x_j-\min_{\rm train}x_j .
+\]
+All ranges and coordinates are fixed during training. They are not
+recomputed from support vectors or from a prediction batch.
+
+Normalize each training coordinate to $u\in[0,1]$. The identity
+$1-|u-v|=1-u-v+2\min(u,v)$ and the free-intercept constraint
+$\sum_i c_i=0$ yield an exact piecewise-linear representation.
+At every distinct training value $u_{j0}<\cdots<u_{jm_j}$, retain a function
+value $\theta_{jk}$, anchoring $\theta_{j0}=0$. Then
+\[
+ g(x)=\sum_j g_j(x_j),\qquad
+ \frac12\|g\|_{\mathcal H}^2
+ =\frac14\sum_j\sum_{k=1}^{m_j}
+ \frac{(\theta_{jk}-\theta_{j,k-1})^2}{u_{jk}-u_{j,k-1}}.
+\]
+The design has one nonzero entry per predictor per row, except at anchors;
+the penalty is block tridiagonal. All distinct training coordinates are used.
+This is neither selected-knot smoothing nor a sampled kernel approximation.
+
+Prediction interpolates adjacent fitted values. Beyond a training range it
+extends the component constantly, as follows from the original kernel
+representer and $\sum_i c_i=0$. A rare factor level or a constant support
+subset therefore cannot change the training range.
+
+## Solvers and numerical ties
+
+The default solver is Clarabel; OSQP is an explicit alternative.
+Diagonal preconditioning and centering of the response improve conditioning
+without changing the objective. If the intercept has an interval of
+minimizers, its midpoint is selected deterministically.
+There is no automatic solver substitution.
+
+The default optimization tolerance is $10^{-12}$. Predictions use a
+training-fixed numerical grid with spacing
+$10^{-8}\max_i |y_i|$. This prevents solver-scale perturbations of tied scores
+from being interpreted as discrimination. The setting
+`prediction_tolerance = 0` exposes raw scores for numerical audits.
+It does not change fitting, the objective, or the stored coefficients.
+The grid width is recorded as `fit$engine$prediction_resolution`.
+With very heavy censoring, inspect sensitivity to this resolution and to the
+optimization tolerance; a small objective gap alone does not establish
+stable risk ordering.
+
+The numerical resolution is not a measurement-error model. Predictive
+comparisons should report it, especially when many scores are tied.
+Scores remain risk-only outputs, not calibrated lifetimes or survival
+probabilities. Higher public risk corresponds to a smaller regression score.
+
+## Fitting and separate tuning
+
+```{r, eval=FALSE}
+linear <- surv_tune(Surv(time, event) ~ temperature + age, data,
+  method = "svm", grid = list(cost = 10^(-3:3)),
+  params = list(kernel = "linear"), folds = 3, cache = TRUE)
+
+additive <- surv_tune(Surv(time, event) ~ temperature + age, data,
+  method = "svm", grid = list(cost = 10^(-3:3)),
+  params = list(kernel = "additive"), folds = 3, cache = TRUE)
+
+linear$results
+additive$results
+surv_diagnostics(additive)
+surv_predict(additive, newdata)
+```
+
+Encoding, imputation, standardization and kernel coordinates are learned
+inside each analysis split. Cost candidates reuse the sparse design and
+constraints within that split; solver states are not shared across folds.
+The selected cost is refitted on all training rows. Test outcomes must not
+be used for cost or kernel selection.
+
+`memory_limit_mb` is a workspace planning limit, not measured peak RSS.
+`collapse_duplicates` is accepted for compatibility but has no effect
+on this primal: every row has its own loss constraints.
+
+## Verification and compatibility
+
+Tests assemble the dense dual independently on small fixtures, compare
+primal and dual objectives, verify the full-kernel representer including
+out-of-range predictions, compare Clarabel and OSQP, and check ties,
+duplicate observations, rare levels, units, caching and resumed tuning.
+
+Models fitted with the older conditioned Hessian must be refitted.
+The old Newton and quadprog paths targeted that different quadratic program
+and are not available for new fits. Agreement with those paths is not
+evidence of agreement with the censored-regression loss above.
